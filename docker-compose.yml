@@ -23,8 +23,9 @@ services:
 
   # Passkey auth + per-user data (Node, no framework).
   # image: prebuilt (docker compose pull). build: from source (docker compose up --build).
+  # OPENGYM_IMAGE_OWNER / OPENGYM_IMAGE_TAG in .env pick whose images and which tag to pull.
   api:
-    image: ghcr.io/duartesantos8/opengym-api:latest
+    image: ghcr.io/${OPENGYM_IMAGE_OWNER:-particle6}/opengym-api:${OPENGYM_IMAGE_TAG:-latest}
     build: ./api
     restart: unless-stopped
     env_file: .env
@@ -41,7 +42,7 @@ services:
   # Builds the React frontend (multi-stage) and serves it, proxying /api → api
   # and the exercise media from the shared volume. Single origin for passkeys.
   web:
-    image: ghcr.io/duartesantos8/opengym-web:latest
+    image: ghcr.io/${OPENGYM_IMAGE_OWNER:-particle6}/opengym-web:${OPENGYM_IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: web/Dockerfile

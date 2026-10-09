@@ -103,8 +103,8 @@ as a home-screen app, passkey sign-in, offline support, sync across your phone a
 You need [Docker](https://docs.docker.com/get-docker/) with Compose.
 
 ```bash
-git clone https://github.com/DuarteSantos8/openGym
-cd openGym
+git clone https://github.com/particle6/opengym
+cd opengym
 cp .env.example .env
 docker compose pull   # grab prebuilt images (amd64 + arm64) — skip to build from source instead
 docker compose up -d
@@ -117,6 +117,126 @@ a build step locally either way.
 
 > Want it reachable from your phone over the internet with passkeys? You'll need an HTTPS
 > domain — a two-line change in `.env`. See **[docs/SELF_HOSTING.md](docs/SELF_HOSTING.md)**.
+
+## Prebuilt images (GHCR)
+
+Every push to `main` that touches `api/`, `web/` or `frontend/` builds both images for
+`linux/amd64` and `linux/arm64` and publishes them to GitHub Container Registry:
+
+- `ghcr.io/particle6/opengym-api`: the API, with the AI Coach, the Claude Agent SDK and the pinned OpenAI Codex CLI built in
+- `ghcr.io/particle6/opengym-web`: the built frontend served by nginx
+
+These are this fork's images. The upstream `duartesantos8` images don't include the AI Coach.
+
+### Tags
+
+| Tag | Published when | Moves? |
+|-----|----------------|--------|
+| `latest` | a build from `main` succeeds | yes, follows `main` |
+| `sha-abc1234` | every build | no, one per commit |
+| `v1.2.3` and `1.2.3` | a `v1.2.3` git tag is pushed | no |
+| `1.2` | a stable `v1.2.x` git tag is pushed | yes, to the newest `1.2.x` release |
+
+Release tags never publish `latest`, and pre-release tags like `v1.3.0-rc.1` only get their own
+tag. To cut a release: `git tag v1.2.3 && git push origin v1.2.3`. You can also run the
+**Publish Docker images** workflow by hand from the Actions tab.
+
+### Making the packages public
+
+GHCR packages start out private, so the first publish needs a one-time change before anything
+can pull without logging in. For each of `opengym-api` and `opengym-web`: open your GitHub
+profile → **Packages** → the package → **Package settings** → **Change visibility** → **Public**.
+While you're there, check that the repository is listed under **Manage Actions access** with
+**Write** role so later workflow runs can keep pushing.
+
+### Pulling
+
+```bash
+docker pull ghcr.io/particle6/opengym-api:latest
+docker pull ghcr.io/particle6/opengym-web:latest
+```
+
+With the compose file in this repo, `docker compose pull` does this for you. Set
+`OPENGYM_IMAGE_TAG` in `.env` to pin a release (`v1.2.3`) instead of following `latest`, or
+`OPENGYM_IMAGE_OWNER` to pull another fork's packages. `docker compose up -d --build` still
+builds from source and ignores both.
+
+### TrueNAS SCALE
+
+TrueNAS can run openGym as a custom app straight from these images, with no Git, Node or build
+tools on the NAS.
+
+1. Create a dataset for the app, e.g. `/mnt/tank/apps/opengym`. The containers create the
+   `data`, `data/codex`, `media/img` and `media/gif` folders inside it on first start.
+2. In the TrueNAS UI go to **Apps** → **Discover Apps** → **⋮** → **Install via YAML**, give it
+   a name, and paste the YAML below.
+3. Change the `/mnt/tank/apps/opengym` paths to your dataset, and set `RP_ID` / `ORIGIN` to the
+   hostname and URL you'll open it at (see [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md); passkeys
+   need HTTPS for anything other than `localhost`). Change the left side of `8080:80` to use
+   a different port.
+
+```yaml
+services:
+  media:
+    image: alpine/git
+    volumes:
+      - /mnt/tank/apps/opengym/media/img:/out/img
+      - /mnt/tank/apps/opengym/media/gif:/out/gif
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ -z "$$(ls -A /out/img 2>/dev/null)" ]; then
+          git clone --depth 1 https://github.com/hasaneyldrm/exercises-dataset /tmp/ds
+          cp /tmp/ds/images/*.jpg /out/img/ && cp /tmp/ds/videos/*.gif /out/gif/
+        fi
+    restart: "no"
+
+  api:   # keep this service name: nginx in the web image proxies to http://api:3000
+    image: ghcr.io/particle6/opengym-api:latest
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      DATA_DIR: /data
+      COACH_CODEX_HOME: /codex
+      RP_ID: gym.example.com
+      ORIGIN: https://gym.example.com
+      RP_NAME: openGym
+      # ADMIN_UIDS: youruserid
+      # INVITE_ONLY: 1
+    volumes:
+      - /mnt/tank/apps/opengym/data:/data
+      - /mnt/tank/apps/opengym/data/codex:/codex
+
+  web:
+    image: ghcr.io/particle6/opengym-web:latest
+    restart: unless-stopped
+    depends_on:
+      media:
+        condition: service_completed_successfully
+      api:
+        condition: service_started
+    ports:
+      - "8080:80"
+    volumes:
+      - /mnt/tank/apps/opengym/media/img:/usr/share/nginx/html/img:ro
+      - /mnt/tank/apps/opengym/media/gif:/usr/share/nginx/html/gif:ro
+```
+
+Everything that needs to survive an update lives in the dataset, not in the containers: `data`
+holds profiles, passkeys, workout state and the session secret, and `data/codex` holds the
+ChatGPT/Codex sign-in. Snapshot or back up the dataset and you've backed up everything. The
+Claude setup token is stored encrypted in `data/coach.json`. Neither credential is baked into an image.
+
+### Updating
+
+- **Docker Compose:** `docker compose pull && docker compose up -d`.
+- **TrueNAS, pinned tag:** edit the app (**Apps** → the app → **Edit**), change the image tags to
+  the new release and save. TrueNAS pulls the new images and recreates the containers.
+- **TrueNAS, `latest`:** the tag name doesn't change, so TrueNAS has to be told to re-pull. Pinning
+  a release tag (or a `sha-` tag) makes updates explicit and easy to roll back, so it's the
+  better choice for a NAS.
+
+Your data is untouched by an update since it lives in the bind-mounted dataset.
 
 ## Mobile app (no server at all)
 
